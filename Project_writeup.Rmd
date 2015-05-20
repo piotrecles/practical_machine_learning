@@ -1,0 +1,159 @@
+---
+title: "Practical Machine Learning Project"
+author: "PJ"
+date: "May 2015"
+output: html_document
+---
+
+#Cleaning and preparing the data
+Loading the training set we see there are 19622 observations of 160 variables.  Before doing anything, let's clean this set up a bit.
+
+A number of the variables are deemed factors when they really shouldn't be (for example kurtosis_roll_belt).  Let's first consider all of the variables that don't look numeric, which for our purposes means the variable is deemed a factor and has fewer than 30 levels.  
+
+```{r,echo=FALSE}
+library(ggplot2)
+library(caret)
+
+  get_non_numeric_cols<-function(to_use)
+  # returns indeces of columns that should be non-numeric
+  {
+    factor_cols<-sapply(X = 1:ncol(to_use),FUN = function(X){
+      if ((is.factor(to_use[,X]))&(length(levels(to_use[,X]))<30))
+      {
+        out<-T
+      }
+      else
+      {
+        out<-F
+      }
+      out
+    })
+  }
+
+  # load the training set
+  training<-read.csv("pml-training.csv")
+
+  # find the columns that are legitimate factors, that is have fewer than 30 levels
+  factor_cols<-get_non_numeric_cols(training)
+```
+
+Of the non-numeric variables, cvtd_timestamp is a date. Everything else is a factor.  There are a couple of variables that look like UNIX timestamps, but turning them into dates is not particularly helpful.
+
+```{r,echo=TRUE}
+# the only factor variable that shouldn't be one is the date
+  training<-transform(training,cvtd_timestamp=as.Date(cvtd_timestamp,format="%d/%m/%Y"))
+```
+
+Now that we've looked at the non-numeric variables, let's turn everything else into a numeric.
+
+```{r,eval=TRUE,echo=TRUE,warning=FALSE}
+# make everything else numeric
+  for (i in seq(1:ncol(training))[!factor_cols])
+  {
+    training[,i]<-as.numeric(as.character(training[,i])) # make it numeric
+  }
+```
+A number of warning are returned (I supressed these in the exposition, no one wants to see a bunch of NAs); lots of values are missing.  Let's take a look at the extent of this issue.
+
+```{r,eval=TRUE,echo=FALSE}
+good_data<-sapply(X=1:ncol(training),FUN=function(X){sum(is.na(training[,X]))/nrow(training)})
+perc_na<-seq(from = 0,to = 1,by = 0.001)
+num_cols<-sapply(X=perc_na,FUN=function(X){length(subset(good_data,(good_data<X)&(good_data>=X-0.001)))})
+to_plot<-data.frame(perc_na,num_cols)
+
+g<-ggplot(data=to_plot)+geom_point(aes(x=perc_na,y=num_cols))
+g<-g+labs(title="NAs records in the training set")+xlab(label="Portion of data NA")+ylab(label="Number of columns")
+```
+
+The plot below shows the number of variables with a given portion of records being NA.
+
+```{r,eval=TRUE,echo=FALSE}
+g
+```
+
+What this plot shows is quite stark.  69 variables have no NAs at all, and the rest are nearly all NAs!  These are quite useless, there isn't much you can do with a column full of NAs, so we remove them from our set.  There really isn't much point in attempting to impute values in these variables, as we have so little data there to begin with.
+
+```{r,eval=TRUE,echo=FALSE}
+good_data<-sapply(X=1:ncol(training),FUN=function(X){
+  perc<-sum(is.na(training[,X]))/nrow(training)
+  if (perc>0.5)
+    out<-FALSE
+  else
+    out<-TRUE
+})
+training<-training[,good_data]
+```
+
+All this cleaning trims our data set from a bloated 160 variables to a muscular 69.
+
+# Pre-processing
+We've cleaned our data set in part by removing variables comprised nearly entirely of NAs.  Our training set now has no NAs at all.  When thinking of pre-processing there is then nothing to impute; there is nothing missing.  We do however have numeric variables at different scales.
+
+```{r,eval=TRUE,echo=FALSE,warning=FALSE}
+medians<-sapply(X=1:69,FUN=function(X){summary(training[,X])[3]})
+to_plot<-data.frame(index=seq(1,length(medians)),medians)
+g<-ggplot(data=to_plot)+geom_point(aes(x=index,y=log(medians)))
+g<-g+labs(title="Variable scales")+xlab(label="Variable")+ylab(label="log(median)")
+g
+```
+
+So our pre-processing should include centering and scaling.  Even after centering and scaling, there are a lot of variables left seeing as we have about 20,000 records.
+
+# Training and prediction
+We're ready to start training.  First, before we do anything else, let's put away 30 percent of the set for testing.
+
+```{r,eval=TRUE,echo=TRUE}
+inTrain<-createDataPartition(y = training$classe,p = 0.7,list = F)
+training_set<-training[inTrain,]
+testing_set<-training[-inTrain,]
+```
+
+The simplest thing to try first is to try to fit a tree to our data.  
+
+```{r,eval=TRUE,echo=TRUE}
+modelFit_rpart<-train(classe~.,data=training_set,method="rpart",preProcess = c("center","scale"),trControl=trainControl(method="cv"))
+```
+
+This ends up being exceptional at predicting A and B.  
+
+```{r,eval=TRUE,echo=TRUE}
+confusionMatrix(predict(modelFit_rpart,testing_set),testing_set$classe)[2]
+```
+
+When this model predicts A or B, it's right.  It is however terrible at predicting C, D, or E.  Just terrible.  Since a CART tree is very simple, let's keep it for predicting A or B, and use a different model if our basic tree predicts something other than A or B.  To this end we form a subset of the training set that only includes C, D, and E outcomes.  This may seem like a lot of unnecessary work, but fitting a random forrest to this entire training set takes a long time, so we have to be a little more clever.
+
+```{r,eval=TRUE,echo=TRUE,message=FALSE}
+training_set_no_AB<-subset(training_set,(classe!="A")&(classe!="B"))
+modelFit_gbm<-train(classe~.,data=training_set_no_AB,method="gbm",preProcess = c("center","scale","pca"),trControl=trainControl(method="cv"),verbose=FALSE)
+```
+
+and we combine the above with our tree in the following prediction function:
+
+```{r,eval=TRUE,echo=TRUE}
+predict_blend<-function(dataset)
+{
+  predictions_rpart<-predict(modelFit_rpart,dataset)
+  predictions_gbm<-predict(modelFit_gbm,dataset)
+  
+  predictions<-sapply(X=1:length(predictions_rpart),FUN=function(X){
+    if ((predictions_rpart[X]!="A")&(predictions_rpart[X]!="B"))
+    {
+      out<-predictions_gbm[X]
+    }
+    else
+    {
+      out<-predictions_rpart[X]
+    }
+    out
+  })
+  predictions
+}
+```
+
+All this gives the following confusion matrix:
+
+```{r,eval=TRUE,echo=TRUE,message=FALSE}
+confusionMatrix(predict_blend(testing_set),testing_set$classe)
+```
+
+What we have is over 99 percent accuracy, and a positive predictive value over 98 percent for each class.  Since we haven't trained on the testing set, we would expect this level of accuracy in the wild.  Alright, so cross validation against the test set tells us we expect about a 99 percent accuracy overall.  It also tells us that we're going to do a very respectable job at predicting each of the types of exercise.
