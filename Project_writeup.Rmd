@@ -8,11 +8,30 @@ output: html_document
 #Cleaning and preparing the data
 Loading the training set we see there are 19622 observations of 160 variables.  Before doing anything, let's clean this set up a bit.
 
-A number of the variables are deemed factors when they really shouldn't be (for example kurtosis_roll_belt).  Let's first consider all of the variables that don't look numeric, which for our purposes means the variable is deemed a factor and has fewer than 30 levels.  
+A number of the variables are deemed factors when they really shouldn't be (for example kurtosis_roll_belt).  There are also a number of variables that are just broken and useless.  These are variables with values of NA and divide by zero for example.  Let's remove these first.
 
-```{r,echo=FALSE}
+Then let's consider all of the variables that don't look numeric, which for our purposes means the variable is deemed a factor and has fewer than 30 levels.  
+
+```{r,echo=FALSE,message=FALSE}
 library(ggplot2)
 library(caret)
+
+get_broken_cols<-function(to_use)
+# returns indeces of columns that are broken,
+# that is a factor with four or fewer levels
+{
+  factor_cols<-sapply(X=1:ncol(to_use),FUN=function(X){
+    if ((is.factor(to_use[,X]))&(length(levels(to_use[,X]))<=4))
+    {
+      out<-T
+    }
+    else
+    {
+      out<-F
+    }
+    out
+  })
+}
 
   get_non_numeric_cols<-function(to_use)
   # returns indeces of columns that should be non-numeric
@@ -32,6 +51,10 @@ library(caret)
 
   # load the training set
   training<-read.csv("pml-training.csv")
+
+  # find the columns that are broken and get rid of them
+  bad_guys<-get_broken_cols(training)
+  training<-training[,!bad_guys]
 
   # find the columns that are legitimate factors, that is have fewer than 30 levels
   factor_cols<-get_non_numeric_cols(training)
@@ -90,7 +113,7 @@ All this cleaning trims our data set from a bloated 160 variables to a muscular 
 We've cleaned our data set in part by removing variables comprised nearly entirely of NAs.  Our training set now has no NAs at all.  When thinking of pre-processing there is then nothing to impute; there is nothing missing.  We do however have numeric variables at different scales.
 
 ```{r,eval=TRUE,echo=FALSE,warning=FALSE}
-medians<-sapply(X=1:69,FUN=function(X){summary(training[,X])[3]})
+medians<-sapply(X=1:length(names(training)),FUN=function(X){summary(training[,X])[3]})
 to_plot<-data.frame(index=seq(1,length(medians)),medians)
 g<-ggplot(data=to_plot)+geom_point(aes(x=index,y=log(medians)))
 g<-g+labs(title="Variable scales")+xlab(label="Variable")+ylab(label="log(median)")
@@ -120,14 +143,14 @@ This ends up being exceptional at predicting A and B.
 confusionMatrix(predict(modelFit_rpart,testing_set),testing_set$classe)[2]
 ```
 
-When this model predicts A or B, it's right.  It is however terrible at predicting C, D, or E.  Just terrible.  Since a CART tree is very simple, let's keep it for predicting A or B, and use a different model if our basic tree predicts something other than A or B.  To this end we form a subset of the training set that only includes C, D, and E outcomes.  This may seem like a lot of unnecessary work, but fitting a random forrest to this entire training set takes a long time, so we have to be a little more clever.
+When this model predicts A or B, it's right.  It is however terrible at predicting C, D, or E.  Just terrible.  Since a CART tree is very simple, let's keep it for predicting A or B, and use a different model if our basic tree predicts something other than A or B.  To this end we form a subset of the training set that only includes C, D, and E outcomes.  This may seem like a lot of unnecessary work, but fitting a random forrest to this entire training set takes a long time, so we would like to be a little more clever.
 
 ```{r,eval=TRUE,echo=TRUE,message=FALSE}
 training_set_no_AB<-subset(training_set,(classe!="A")&(classe!="B"))
 modelFit_gbm<-train(classe~.,data=training_set_no_AB,method="gbm",preProcess = c("center","scale","pca"),trControl=trainControl(method="cv"),verbose=FALSE)
 ```
 
-and we combine the above with our tree in the following prediction function:
+and we combine the above gradient boosted tree with our simple CART tree in the following prediction function:
 
 ```{r,eval=TRUE,echo=TRUE}
 predict_blend<-function(dataset)
@@ -157,3 +180,12 @@ confusionMatrix(predict_blend(testing_set),testing_set$classe)
 ```
 
 What we have is over 99 percent accuracy, and a positive predictive value over 98 percent for each class.  Since we haven't trained on the testing set, we would expect this level of accuracy in the wild.  Alright, so cross validation against the test set tells us we expect about a 99 percent accuracy overall.  It also tells us that we're going to do a very respectable job at predicting each of the types of exercise.
+
+This model is pretty simple, so it's also pretty fast.  Given that we've cleaned the data already, there's no harm in trying something a little more complex.  We got a decent model with trees, so let's try a random forrest.
+
+```{r,eval=TRUE,echo=TRUE,message=FALSE,warning=FALSE}
+modelFit_rf<-train(classe~.,data=training_set,method="rf",preProcess = c("center","scale","pca"),trControl=trainControl(method="cv"))
+confusionMatrix(predict(modelFit_rf,testing_set),testing_set$classe)
+```
+
+The random forrest does an excellent job, and it's simpler to use than our previous model (since we didn't have to split the training set and train different models on the parts), but it does take longer to run.
